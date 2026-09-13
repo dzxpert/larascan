@@ -2,12 +2,13 @@ package recon
 
 import (
 	"fmt"
-	"github.com/fatih/color"
-	"io/ioutil"
+	"io"
 	"larascan/internal/common"
 	"larascan/pkg/httpclient"
 	"strings"
 	"time"
+
+	"github.com/fatih/color"
 )
 
 // HostHeaderInjectionScan is a struct that contains an HTTP client
@@ -48,17 +49,18 @@ func (hhi *HostHeaderInjectionScan) Run(target string) []common.ScanResult {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 	if err != nil {
-		results = append(results, common.ScanResult{
-			ScanName:    hhi.Name(),
-			Category:    "Recon",
-			Description: fmt.Sprintf("Failed to read response body"),
-			Path:        target,
-			StatusCode:  resp.StatusCode,
-			Detail:      err.Error(),
-		})
-		return results
+		return []common.ScanResult{
+			{
+				ScanName:    hhi.Name(),
+				Category:    "Recon",
+				Description: fmt.Sprintf("Failed to read response body"),
+				Path:        target,
+				StatusCode:  resp.StatusCode,
+				Detail:      err.Error(),
+			},
+		}
 	}
 
 	body := string(bodyBytes)
@@ -112,8 +114,12 @@ func (hhi *HostHeaderInjectionScan) checkPasswordRecoveryURLs(target string) boo
 	for _, path := range passwordRecoveryURLs {
 		url := strings.TrimRight(target, "/") + path
 		resp, err := hhi.client.Get(url, nil)
-		if err == nil && resp.StatusCode == 200 {
-			return true
+		if err == nil {
+			status := resp.StatusCode
+			resp.Body.Close()
+			if status == 200 {
+				return true
+			}
 		}
 	}
 

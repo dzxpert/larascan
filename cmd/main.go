@@ -31,6 +31,27 @@ func main() {
 
 	// Display results
 	for _, result := range scanResults {
-		fmt.Printf("[%s] [%s] \nPath:%s \nDetails: %s (Status Code: %d). %s \n\n", result.Category, result.ScanName, result.Path, result.Description, result.StatusCode, result.Detail)
+		statusStr := ""
+		if result.StatusCode > 0 {
+			statusStr = fmt.Sprintf(" (Status Code: %d)", result.StatusCode)
+		}
+		detailStr := ""
+		if result.Detail != "" {
+			detailStr = fmt.Sprintf(" %s", result.Detail)
+		}
+
+		pathStr := result.Path
+		if pathStr == "" {
+			pathStr = *url
+		}
+
+		fmt.Printf("[%s] [%s]\nPath: %s\nDetails: %s%s.%s\n\n",
+			result.Category,
+			result.ScanName,
+			pathStr,
+			result.Description,
+			statusStr,
+			detailStr,
+		)
 	}
 }

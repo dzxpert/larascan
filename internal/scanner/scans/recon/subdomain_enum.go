@@ -54,14 +54,31 @@ func (ses *SubdomainEnumScan) Run(target string) []common.ScanResult {
 	return results
 }
 
-func extractDomain(url string) string {
-	// Simple extraction; can be enhanced with proper URL parsing
-	parts := strings.Split(url, "//")
+func extractDomain(urlStr string) string {
+	parts := strings.Split(urlStr, "//")
 	if len(parts) > 1 {
-		url = parts[1]
+		urlStr = parts[1]
 	}
-	parts = strings.Split(url, "/")
-	return parts[0]
+	parts = strings.Split(urlStr, "/")
+	host := strings.Split(parts[0], ":")[0]
+
+	// Check if host is an IP address
+	if net.ParseIP(host) != nil || host == "localhost" {
+		return host
+	}
+
+	// Extract root/apex domain (e.g., app.chargily.net -> chargily.net)
+	hostParts := strings.Split(host, ".")
+	if len(hostParts) > 2 {
+		secondLast := strings.ToLower(hostParts[len(hostParts)-2])
+		// Check for multi-part ccTLDs like .co.uk, .com.au, .com.dz
+		if (secondLast == "co" || secondLast == "com" || secondLast == "org" || secondLast == "net" || secondLast == "gov" || secondLast == "edu") && len(hostParts) > 3 {
+			return strings.Join(hostParts[len(hostParts)-3:], ".")
+		}
+		return strings.Join(hostParts[len(hostParts)-2:], ".")
+	}
+
+	return host
 }
 
 func (pvs *SubdomainEnumScan) Name() string {

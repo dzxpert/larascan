@@ -3,7 +3,7 @@ package recon
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"larascan/internal/common"
 	"larascan/pkg/httpclient"
 	"net/http"
@@ -46,7 +46,13 @@ func (lvs *LaravelVersionScan) Run(target string) []common.ScanResult {
 	}
 
 	if len(results) == 0 {
-		results = append(results, lvs.addResult("Laravel version could not be detected", target))
+		results = append(results, common.ScanResult{
+			ScanName:    lvs.Name(),
+			Category:    reconCategory,
+			Description: "Laravel version could not be detected",
+			Path:        target,
+			StatusCode:  0,
+		})
 	}
 	return results
 }
@@ -65,10 +71,13 @@ func (lvs *LaravelVersionScan) checkComposerFile(target, path string) string {
 	url := strings.TrimRight(target, "/") + path
 	resp, err := lvs.client.Get(url, nil)
 	if err != nil || resp.StatusCode != statusOk {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 		return ""
 	}
 	defer resp.Body.Close()
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
 		return ""
 	}
@@ -105,11 +114,14 @@ func (lvs *LaravelVersionScan) checkVendorFolder(target string) bool {
 	url := strings.TrimRight(target, "/") + "/vendor/"
 	resp, err := lvs.client.Get(url, nil)
 	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 		return false
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
 		return false
 	}

@@ -1,10 +1,10 @@
 package vulnerabilities
 
 import (
-	"io/ioutil"
+	"fmt"
+	"io"
 	"larascan/internal/common"
 	"larascan/pkg/httpclient"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -21,8 +21,8 @@ func NewDebugModeScan() *DebugModeScan {
 
 // Run checks if the Laravel debug mode is enabled by triggering an error page
 func (d *DebugModeScan) Run(target string) []common.ScanResult {
-	// Intentionally trigger an error to check for debug mode
-	errorURL := target + "/nonexistentpage"
+	// Intentionally trigger an error/404 to check for debug mode
+	errorURL := strings.TrimRight(target, "/") + "/nonexistentpage"
 
 	resp, err := d.client.Get(errorURL, nil)
 	if err != nil {
@@ -39,51 +39,51 @@ func (d *DebugModeScan) Run(target string) []common.ScanResult {
 	}
 	defer resp.Body.Close()
 
-	var results []common.ScanResult
-
-	if resp.StatusCode == http.StatusInternalServerError {
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			results = append(results, common.ScanResult{
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+	if err != nil {
+		return []common.ScanResult{
+			{
 				ScanName:    d.Name(),
 				Category:    "Vulnerabilities",
 				Description: "Failed to read response body from error page",
 				Path:        errorURL,
 				StatusCode:  resp.StatusCode,
 				Detail:      err.Error(),
-			})
-			return results
+			},
 		}
-		body := string(bodyBytes)
+	}
+	body := string(bodyBytes)
 
-		if strings.Contains(body, "Whoops, looks like something went wrong.") ||
-			strings.Contains(body, "exception") {
-			results = append(results, common.ScanResult{
-				ScanName:    d.Name(),
-				Category:    "Vulnerabilities",
-				Description: "Debug mode is enabled!",
-				Path:        errorURL,
-				StatusCode:  resp.StatusCode,
-				Detail:      "The application displayed a detailed error page, indicating that debug mode is active.",
-			})
-		} else {
-			results = append(results, common.ScanResult{
-				ScanName:    d.Name(),
-				Category:    "Vulnerabilities",
-				Description: "Debug mode is disabled.",
-				Path:        errorURL,
-				StatusCode:  resp.StatusCode,
-				Detail:      "The application did not display a detailed error page, indicating that debug mode is likely disabled.",
-			})
-		}
+	// Check for signatures of debug mode (Ignition, Whoops, stack traces)
+	isDebugEnabled := strings.Contains(body, "Whoops, looks like something went wrong.") ||
+		strings.Contains(body, "Whoops\\Exception") ||
+		strings.Contains(body, "window.ignite") ||
+		strings.Contains(body, "ignition-app") ||
+		strings.Contains(body, "flare-client") ||
+		strings.Contains(body, "NotFoundHttpException") ||
+		strings.Contains(body, "MethodNotAllowedHttpException") ||
+		strings.Contains(body, "vendor/laravel/framework") ||
+		(strings.Contains(body, "stack-trace") && strings.Contains(body, "exception"))
+
+	var results []common.ScanResult
+
+	if isDebugEnabled {
+		results = append(results, common.ScanResult{
+			ScanName:    d.Name(),
+			Category:    "Vulnerabilities",
+			Description: "Debug mode is enabled!",
+			Path:        errorURL,
+			StatusCode:  resp.StatusCode,
+			Detail:      "The application displayed a detailed error/debug page with stack trace or Ignition interface, indicating that debug mode is active.",
+		})
 	} else {
 		results = append(results, common.ScanResult{
 			ScanName:    d.Name(),
 			Category:    "Vulnerabilities",
-			Description: "Could not determine debug mode status.",
+			Description: "Debug mode is disabled.",
 			Path:        errorURL,
 			StatusCode:  resp.StatusCode,
-			Detail:      "The server did not return a 500 Internal Server Error as expected, making it difficult to assess debug mode status.",
+			Detail:      fmt.Sprintf("Status %d returned without exposing stack traces or debug information.", resp.StatusCode),
 		})
 	}
 

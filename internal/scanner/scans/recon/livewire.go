@@ -2,12 +2,14 @@ package recon
 
 import (
 	"fmt"
-	"github.com/fatih/color"
-	"io/ioutil"
-	"larascan/internal/common"
-	"larascan/pkg/httpclient"
+	"io"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/fatih/color"
+	"larascan/internal/common"
+	"larascan/pkg/httpclient"
 )
 
 // LivewireScan is a struct that contains an HTTP client
@@ -25,65 +27,147 @@ func NewLivewireScan() *LivewireScan {
 // Run checks if Livewire is used on the target site and attempts to determine the version
 func (lws *LivewireScan) Run(target string) []common.ScanResult {
 	var results []common.ScanResult
+	cleanTarget := strings.TrimRight(target, "/")
 
-	// List of possible Livewire paths
-	paths := []string{
-		"/vendor/livewire/livewire.js",
-		"/vendor/livewire/livewire.min.js",
+	// Candidate paths to test
+	pathsToCheck := []string{
 		"/livewire/livewire.js",
 		"/livewire/livewire.min.js",
+		"/vendor/livewire/livewire.js",
+		"/vendor/livewire/livewire.min.js",
 	}
 
-	for _, path := range paths {
-		url := strings.TrimRight(target, "/") + path
-		resp, err := lws.client.Get(url, nil)
-		if err != nil || resp.StatusCode != 200 {
-			continue // Try the next path if the request fails or the file is not found
+	htmlDomVersion := ""
+	htmlLivewireFound := false
+
+	// First, fetch the target page to look for dynamically loaded Livewire scripts or DOM markers
+	targetResp, err := lws.client.Get(cleanTarget, nil)
+	if err == nil && targetResp.StatusCode == 200 {
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(targetResp.Body, 512*1024)) // read up to 512KB
+		targetResp.Body.Close()
+
+		if readErr == nil {
+			bodyStr := string(bodyBytes)
+
+			// Search for livewire script tags in HTML
+			scriptRe := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']*livewire[^"']*\.js[^"']*)["']`)
+			matches := scriptRe.FindAllStringSubmatch(bodyStr, -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					scriptPath := match[1]
+					// Prepend candidate so it is tested first
+					pathsToCheck = append([]string{scriptPath}, pathsToCheck...)
+					htmlLivewireFound = true
+				}
+			}
+
+			// Check DOM attributes
+			if strings.Contains(bodyStr, "wire:snapshot") {
+				htmlLivewireFound = true
+				htmlDomVersion = "3.x"
+			} else if strings.Contains(bodyStr, "wire:initial-data") {
+				htmlLivewireFound = true
+				htmlDomVersion = "2.x"
+			} else if strings.Contains(bodyStr, "wire:id") {
+				htmlLivewireFound = true
+			}
+		}
+	} else if targetResp != nil {
+		targetResp.Body.Close()
+	}
+
+	testedUrls := make(map[string]bool)
+
+	for _, path := range pathsToCheck {
+		var checkURL string
+		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+			checkURL = path
+		} else if strings.HasPrefix(path, "/") {
+			checkURL = cleanTarget + path
+		} else {
+			checkURL = cleanTarget + "/" + path
 		}
 
-		defer resp.Body.Close()
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
+		if testedUrls[checkURL] {
+			continue
+		}
+		testedUrls[checkURL] = true
+
+		resp, err := lws.client.Get(checkURL, nil)
+		if err != nil || resp.StatusCode != 200 {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
+		resp.Body.Close()
 		if err != nil {
-			results = append(results, common.ScanResult{
-				ScanName:    lws.Name(),
-				Category:    "Recon",
-				Description: lws.renderStyled(fmt.Sprintf("Failed to read Livewire file content from %s", url), "error"),
-				Path:        path,
-				StatusCode:  resp.StatusCode,
-				Detail:      err.Error(),
-			})
 			continue
 		}
 		body := string(bodyBytes)
 
-		// Determine the version based on the content
-		if strings.Contains(body, "window.livewire_token") {
+		// Determine the version based on script content
+		if strings.Contains(body, "window.livewireScriptConfig") ||
+			strings.Contains(body, "Livewire 3") ||
+			strings.Contains(body, "window.Livewire") && strings.Contains(body, "snapshot") {
 			results = append(results, common.ScanResult{
 				ScanName:    lws.Name(),
 				Category:    "Recon",
-				Description: lws.renderStyled(fmt.Sprintf("Livewire detected: Version 2.x at %s", url), "success"),
-				Path:        path,
-				StatusCode:  resp.StatusCode,
-				Detail:      lws.getVulnerabilitiesForV2(),
-			})
-		} else if strings.Contains(body, "window.livewireScriptConfig") {
-			results = append(results, common.ScanResult{
-				ScanName:    lws.Name(),
-				Category:    "Recon",
-				Description: fmt.Sprintf("Livewire detected: Version 3.x at %s", url),
-				Path:        path,
+				Description: fmt.Sprintf("Livewire detected: Version 3.x at %s", checkURL),
+				Path:        checkURL,
 				StatusCode:  resp.StatusCode,
 				Detail:      lws.getVulnerabilitiesForV3(),
 			})
-		} else {
+			break
+		} else if strings.Contains(body, "window.livewire_token") ||
+			strings.Contains(body, "Livewire 2") {
 			results = append(results, common.ScanResult{
 				ScanName:    lws.Name(),
 				Category:    "Recon",
-				Description: fmt.Sprintf("Livewire detected at %s, but unable to determine version", url),
-				Path:        path,
+				Description: lws.renderStyled(fmt.Sprintf("Livewire detected: Version 2.x at %s", checkURL), "success"),
+				Path:        checkURL,
+				StatusCode:  resp.StatusCode,
+				Detail:      lws.getVulnerabilitiesForV2(),
+			})
+			break
+		} else if strings.Contains(body, "Livewire") || strings.Contains(body, "livewire") {
+			versionText := "unable to determine version"
+			if htmlDomVersion != "" {
+				versionText = fmt.Sprintf("Version %s (inferred from DOM markers)", htmlDomVersion)
+			}
+			results = append(results, common.ScanResult{
+				ScanName:    lws.Name(),
+				Category:    "Recon",
+				Description: fmt.Sprintf("Livewire detected at %s (%s)", checkURL, versionText),
+				Path:        checkURL,
 				StatusCode:  resp.StatusCode,
 			})
+			break
 		}
+	}
+
+	// If script wasn't directly accessible but HTML had Livewire DOM markers
+	if len(results) == 0 && htmlLivewireFound {
+		desc := "Livewire detected via HTML DOM markers (wire:id)"
+		detail := ""
+		if htmlDomVersion == "3.x" {
+			desc = "Livewire detected: Version 3.x (via wire:snapshot DOM marker)"
+			detail = lws.getVulnerabilitiesForV3()
+		} else if htmlDomVersion == "2.x" {
+			desc = "Livewire detected: Version 2.x (via wire:initial-data DOM marker)"
+			detail = lws.getVulnerabilitiesForV2()
+		}
+
+		results = append(results, common.ScanResult{
+			ScanName:    lws.Name(),
+			Category:    "Recon",
+			Description: desc,
+			Path:        target,
+			StatusCode:  200,
+			Detail:      detail,
+		})
 	}
 
 	if len(results) == 0 {
@@ -92,7 +176,7 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 			Category:    "Recon",
 			Description: "Livewire not detected",
 			Path:        target,
-			StatusCode:  0,
+			StatusCode:  200,
 		})
 	}
 

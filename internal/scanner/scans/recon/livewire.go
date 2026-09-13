@@ -30,7 +30,7 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 	var results []common.ScanResult
 	cleanTarget := strings.TrimRight(target, "/")
 
-	// Candidate paths to test
+	// Candidate paths to test directly
 	pathsToCheck := []string{
 		"/livewire/livewire.js",
 		"/livewire/livewire.min.js",
@@ -41,12 +41,30 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 	htmlDomVersion := ""
 	htmlLivewireFound := false
 
-	// Target pages to inspect (the provided target and its root URL if different)
-	targetsToInspect := []string{cleanTarget}
+	// Determine origin base URL (e.g., https://app.chargily.net)
+	originBaseURL := cleanTarget
 	if parsedURL, parseErr := url.Parse(cleanTarget); parseErr == nil && parsedURL.Host != "" {
-		rootURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-		if rootURL != cleanTarget {
-			targetsToInspect = append(targetsToInspect, rootURL)
+		originBaseURL = fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+	}
+
+	// Target pages to inspect for Livewire script tags and DOM markers
+	candidatePages := []string{
+		cleanTarget,
+		cleanTarget + "/admin/login",
+		cleanTarget + "/admin",
+		cleanTarget + "/login",
+		originBaseURL + "/admin/login",
+		originBaseURL + "/admin",
+		originBaseURL + "/login",
+		originBaseURL,
+	}
+
+	seenPages := make(map[string]bool)
+	var targetsToInspect []string
+	for _, p := range candidatePages {
+		if !seenPages[p] {
+			seenPages[p] = true
+			targetsToInspect = append(targetsToInspect, p)
 		}
 	}
 
@@ -80,7 +98,7 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 					htmlLivewireFound = true
 				}
 			}
-		} else if targetResp != nil {
+		} else if targetResp != nil && targetResp.Body != nil {
 			targetResp.Body.Close()
 		}
 	}
@@ -92,9 +110,9 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 		if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 			checkURL = path
 		} else if strings.HasPrefix(path, "/") {
-			checkURL = cleanTarget + path
+			checkURL = originBaseURL + path
 		} else {
-			checkURL = cleanTarget + "/" + path
+			checkURL = originBaseURL + "/" + path
 		}
 
 		if testedUrls[checkURL] {

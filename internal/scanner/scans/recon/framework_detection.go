@@ -80,40 +80,70 @@ func (fds *FrameworkDetectionScan) Run(target string) []common.ScanResult {
 		if strings.Contains(body, `data-page="`) || strings.Contains(body, "window.__inertia") {
 			indicators = append(indicators, "Inertia.js SPA attributes")
 		}
+		if strings.Contains(body, "/js/filament/") || strings.Contains(body, "filament") {
+			indicators = append(indicators, "Filament Admin panel (Laravel)")
+		}
 	}
 
-	// If not detected on the provided path, check the root URL as fallback
+	// If not detected on the provided path, check common application endpoints as fallback
 	if len(indicators) == 0 {
-		if parsedURL, parseErr := url.Parse(target); parseErr == nil && parsedURL.Host != "" {
-			rootURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-			if rootURL != strings.TrimRight(target, "/") {
-				rootResp, rootErr := fds.client.Get(rootURL, headers)
-				if rootErr == nil && rootResp.StatusCode == 200 {
-					for _, cookie := range rootResp.Cookies() {
-						if strings.EqualFold(cookie.Name, "XSRF-TOKEN") {
-							hasXsrf = true
-							indicators = append(indicators, "XSRF-TOKEN cookie on root domain")
-						} else if strings.Contains(strings.ToLower(cookie.Name), "laravel") {
-							indicators = append(indicators, fmt.Sprintf("Laravel cookie on root domain (%s)", cookie.Name))
-						}
-					}
-					rootBodyBytes, rootReadErr := io.ReadAll(io.LimitReader(rootResp.Body, 128*1024))
-					rootResp.Body.Close()
-					if rootReadErr == nil {
-						rootBody := string(rootBodyBytes)
-						if strings.Contains(rootBody, `name="csrf-token"`) || strings.Contains(rootBody, `name='csrf-token'`) {
-							indicators = append(indicators, "CSRF token meta tag on root domain")
-						}
-						if strings.Contains(rootBody, "window.Laravel") {
-							indicators = append(indicators, "window.Laravel on root domain")
-						}
-						if strings.Contains(rootBody, "wire:snapshot") || strings.Contains(rootBody, "wire:id") || strings.Contains(rootBody, "livewire") {
-							indicators = append(indicators, "Livewire markers on root domain")
-						}
-					}
-				} else if rootResp != nil && rootResp.Body != nil {
-					rootResp.Body.Close()
+		cleanTarget := strings.TrimRight(target, "/")
+		originBaseURL := cleanTarget
+		if parsedURL, parseErr := url.Parse(cleanTarget); parseErr == nil && parsedURL.Host != "" {
+			originBaseURL = fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+		}
+
+		fallbackPages := []string{
+			originBaseURL + "/admin/login",
+			originBaseURL + "/admin",
+			originBaseURL + "/login",
+			originBaseURL,
+		}
+
+		seen := make(map[string]bool)
+		for _, pageURL := range fallbackPages {
+			if seen[pageURL] || pageURL == cleanTarget {
+				continue
+			}
+			seen[pageURL] = true
+
+			fResp, fErr := fds.client.Get(pageURL, headers)
+			if fErr != nil || fResp.StatusCode != 200 {
+				if fResp != nil && fResp.Body != nil {
+					fResp.Body.Close()
 				}
+				continue
+			}
+
+			for _, cookie := range fResp.Cookies() {
+				if strings.EqualFold(cookie.Name, "XSRF-TOKEN") {
+					hasXsrf = true
+					indicators = append(indicators, fmt.Sprintf("XSRF-TOKEN cookie on %s", pageURL))
+				} else if strings.Contains(strings.ToLower(cookie.Name), "laravel") {
+					indicators = append(indicators, fmt.Sprintf("Laravel cookie on %s (%s)", pageURL, cookie.Name))
+				}
+			}
+
+			fBodyBytes, fReadErr := io.ReadAll(io.LimitReader(fResp.Body, 128*1024))
+			fResp.Body.Close()
+			if fReadErr == nil {
+				fBody := string(fBodyBytes)
+				if strings.Contains(fBody, "/js/filament/") {
+					indicators = append(indicators, fmt.Sprintf("Filament Admin panel assets on %s", pageURL))
+				}
+				if strings.Contains(fBody, "livewire") {
+					indicators = append(indicators, fmt.Sprintf("Livewire markers on %s", pageURL))
+				}
+				if strings.Contains(fBody, `name="csrf-token"`) || strings.Contains(fBody, `name='csrf-token'`) {
+					indicators = append(indicators, fmt.Sprintf("CSRF token meta tag on %s", pageURL))
+				}
+				if strings.Contains(fBody, "window.Laravel") {
+					indicators = append(indicators, fmt.Sprintf("window.Laravel on %s", pageURL))
+				}
+			}
+
+			if len(indicators) > 0 {
+				break
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package recon
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -40,40 +41,48 @@ func (lws *LivewireScan) Run(target string) []common.ScanResult {
 	htmlDomVersion := ""
 	htmlLivewireFound := false
 
-	// First, fetch the target page to look for dynamically loaded Livewire scripts or DOM markers
-	targetResp, err := lws.client.Get(cleanTarget, nil)
-	if err == nil && targetResp.StatusCode == 200 {
-		bodyBytes, readErr := io.ReadAll(io.LimitReader(targetResp.Body, 512*1024)) // read up to 512KB
-		targetResp.Body.Close()
+	// Target pages to inspect (the provided target and its root URL if different)
+	targetsToInspect := []string{cleanTarget}
+	if parsedURL, parseErr := url.Parse(cleanTarget); parseErr == nil && parsedURL.Host != "" {
+		rootURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+		if rootURL != cleanTarget {
+			targetsToInspect = append(targetsToInspect, rootURL)
+		}
+	}
 
-		if readErr == nil {
-			bodyStr := string(bodyBytes)
+	// Fetch pages to look for dynamically loaded Livewire scripts or DOM markers
+	scriptRe := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']*livewire[^"']*)["']`)
+	for _, inspectTarget := range targetsToInspect {
+		targetResp, err := lws.client.Get(inspectTarget, nil)
+		if err == nil && targetResp.StatusCode == 200 {
+			bodyBytes, readErr := io.ReadAll(io.LimitReader(targetResp.Body, 512*1024))
+			targetResp.Body.Close()
 
-			// Search for livewire script tags in HTML
-			scriptRe := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']*livewire[^"']*\.js[^"']*)["']`)
-			matches := scriptRe.FindAllStringSubmatch(bodyStr, -1)
-			for _, match := range matches {
-				if len(match) > 1 {
-					scriptPath := match[1]
-					// Prepend candidate so it is tested first
-					pathsToCheck = append([]string{scriptPath}, pathsToCheck...)
+			if readErr == nil {
+				bodyStr := string(bodyBytes)
+
+				matches := scriptRe.FindAllStringSubmatch(bodyStr, -1)
+				for _, match := range matches {
+					if len(match) > 1 {
+						scriptPath := match[1]
+						pathsToCheck = append([]string{scriptPath}, pathsToCheck...)
+						htmlLivewireFound = true
+					}
+				}
+
+				if strings.Contains(bodyStr, "wire:snapshot") {
+					htmlLivewireFound = true
+					htmlDomVersion = "3.x"
+				} else if strings.Contains(bodyStr, "wire:initial-data") {
+					htmlLivewireFound = true
+					htmlDomVersion = "2.x"
+				} else if strings.Contains(bodyStr, "wire:id") {
 					htmlLivewireFound = true
 				}
 			}
-
-			// Check DOM attributes
-			if strings.Contains(bodyStr, "wire:snapshot") {
-				htmlLivewireFound = true
-				htmlDomVersion = "3.x"
-			} else if strings.Contains(bodyStr, "wire:initial-data") {
-				htmlLivewireFound = true
-				htmlDomVersion = "2.x"
-			} else if strings.Contains(bodyStr, "wire:id") {
-				htmlLivewireFound = true
-			}
+		} else if targetResp != nil {
+			targetResp.Body.Close()
 		}
-	} else if targetResp != nil {
-		targetResp.Body.Close()
 	}
 
 	testedUrls := make(map[string]bool)

@@ -18,9 +18,30 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.20' 
+        go-version: '1.21'
 
-    - name: Build
-      run: go build -v ./...
+    - name: Build Windows binary
+      env:
+        GOOS: windows
+        GOARCH: amd64
+      run: go build -v -o larascan.exe ./cmd
+
+    - name: Upload Windows binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: larascan-windows-amd64
+        path: larascan.exe
+
+    - name: Build Linux binary
+      env:
+        GOOS: linux
+        GOARCH: amd64
+      run: go build -v -o larascan ./cmd
+
+    - name: Upload Linux binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: larascan-linux-amd64
+        path: larascan
